@@ -1,4 +1,4 @@
-@file:OptIn(UnsafeDuringIrConstructionAPI::class)
+@file:OptIn(UnsafeDuringIrConstructionAPI::class, ObsoleteDescriptorBasedAPI::class)
 package yairm210.purity.validation
 
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageLocation
@@ -12,7 +12,9 @@ import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
 import org.jetbrains.kotlin.ir.types.classFqName
 import org.jetbrains.kotlin.ir.types.getClass
 import org.jetbrains.kotlin.ir.util.*
-import org.jetbrains.kotlin.ir.visitors.IrElementVisitor
+import org.jetbrains.kotlin.ir.visitors.IrVisitor
+import org.jetbrains.kotlin.ir.ObsoleteDescriptorBasedAPI
+import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.name.FqName
 import yairm210.purity.PurityConfig
 import yairm210.purity.validation.wellknown.wellKnownInternalStateClasses
@@ -45,7 +47,7 @@ class CheckFunctionPurityVisitor(
     private val declaredFunctionPurity: FunctionPurity,
     private val messageCollector: MessageCollector,
     private val purityConfig: PurityConfig,
-    ) : IrElementVisitor<Unit, Unit> { // Returns whether this is an acceptable X function
+    ) : IrVisitor<Unit, Nothing?>() { // Returns whether this is an acceptable X function
         
     private var isReadonly = true
     private var isPure = true
@@ -78,7 +80,7 @@ class CheckFunctionPurityVisitor(
     }
 
     // Iterate over IR tree and warn on each var set where the var is not created within this function
-    override fun visitSetValue(expression: IrSetValue, data: Unit) {
+    override fun visitSetValue(expression: IrSetValue, data: Nothing?) {
         if (declaredFunctionPurity == FunctionPurity.None){
             return super.visitSetValue(expression, data)
         }
@@ -112,7 +114,7 @@ class CheckFunctionPurityVisitor(
     }
     
     private val localStateVariables = HashSet<IrVariable>()
-    override fun visitVariable(declaration: IrVariable, data: Unit) {
+    override fun visitVariable(declaration: IrVariable, data: Nothing?) {
         val initializer = declaration.initializer
         // If we're initializing a val with a constructor call to a well-known internal state class, it's the same as manually adding @LocalState
         if (!declaration.isVar && initializer is IrConstructorCall
@@ -134,7 +136,7 @@ class CheckFunctionPurityVisitor(
         return super.visitVariable(declaration, data)
     }
 
-    override fun visitGetValue(expression: IrGetValue, data: Unit) {
+    override fun visitGetValue(expression: IrGetValue, data: Nothing?) {
         val varValueDeclaration: IrValueDeclaration = expression.symbol.owner
         
         // If the variable is created in this function that's ok
@@ -152,7 +154,7 @@ class CheckFunctionPurityVisitor(
         super.visitGetValue(expression, data)
     }
     
-    override fun visitCall(expression: IrCall, data: Unit) {
+    override fun visitCall(expression: IrCall, data: Nothing?) {
 
         checkCalledFunctionPurity(expression)
         checkMarkedParameters(expression)
@@ -164,11 +166,17 @@ class CheckFunctionPurityVisitor(
     private fun checkCalledFunctionPurity(expression: IrCall) {
         
         val calledFunction = expression.symbol.owner
-        
-        // This is a subfunction of the current function, so it's already checked
-        if (function in calledFunction.parents) return
 
-        val receiver = expression.dispatchReceiver ?: expression.extensionReceiver
+        val owner = expression.symbol.owner
+        val args = expression.arguments
+        val hasDispatch = owner.parameters.any { it.kind == IrParameterKind.DispatchReceiver }
+        val contextCount = owner.parameters.count { it.kind == IrParameterKind.Context }
+        val dispatchReceiver = if (hasDispatch) args[0] else null
+        val hasExtension = owner.parameters.any { it.kind == IrParameterKind.ExtensionReceiver }
+        val receiver = dispatchReceiver ?: if (hasExtension) {
+            val index = (if (hasDispatch) 1 else 0) + contextCount
+            args[index]
+        } else null
         
         fun receiverHasAnnotation(annotation: FqName): Boolean =
             receiver?.let { representsAnnotationBearer(it, annotation) } == true
@@ -381,7 +389,7 @@ class CheckFunctionPurityVisitor(
         )
 
         // If there are problems, this will raise them as-is
-        parameterExpression.function.accept(visitor, Unit)
+        parameterExpression.function.accept(visitor, null)
     }
 
     /** For expressions of type 'function'
@@ -423,10 +431,10 @@ class CheckFunctionPurityVisitor(
         else -> null
     }
 
-    override fun visitFunction(declaration: IrFunction, data: Unit) {
+    override fun visitFunction(declaration: IrFunction, data: Nothing?) {
         // Ensure that all annotated parameters have acceptable default values
         
-        val valueParameters = declaration.valueParameters
+        val valueParameters = declaration.parameters.filter { it.kind == IrParameterKind.Context || it.kind == IrParameterKind.Regular }
         for (parameter in valueParameters) {
             val defaultValue = parameter.defaultValue ?: continue
             
@@ -451,7 +459,7 @@ class CheckFunctionPurityVisitor(
                 )
 
                 // If there are problems, this will raise them as-is
-                defaultExpression.function.accept(visitor, Unit)
+                defaultExpression.function.accept(visitor, null)
                 continue
             }
             
@@ -474,7 +482,7 @@ class CheckFunctionPurityVisitor(
         super.visitFunction(declaration, data)
     }
 
-    override fun visitElement(element: IrElement, data: Unit) {
+    override fun visitElement(element: IrElement, data: Nothing?) {
         element.acceptChildren(this, data)
     }
 }
